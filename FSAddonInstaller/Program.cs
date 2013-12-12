@@ -70,8 +70,7 @@ namespace FSAddonInstaller {
             }
 
             // Class member initialisation
-            path = null;
-            fsxDirectory = null;
+            this.path = path;
             directoryCount = 0;
             fileCount = 0;
             skipCount = 0;
@@ -164,6 +163,9 @@ namespace FSAddonInstaller {
                     directoryCount++;
                 }
             }
+
+            // Print a summary of operations
+            Console.WriteLine("\r\nDeleted {0} files, {1} directories.\r\nRestored: {2} files.\r\n", fileCount, directoryCount, backupCount);
         }
 
         /// <summary>
@@ -187,7 +189,7 @@ namespace FSAddonInstaller {
         private void getFilesAndDirectories(string source) {
             foreach (string file in Directory.GetFiles(source)) {
                 // Get the relative path
-                string relPath = file.Substring(source.Length + 1, file.Length - (source.Length - 1));
+                string relPath = file.Substring(path.Length + 1, (file.Length - path.Length) - 1);
                 Console.WriteLine(Path.Combine(fsxDirectory, relPath));
 
                 // Copy the file to the new location
