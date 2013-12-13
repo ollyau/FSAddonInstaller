@@ -1,39 +1,181 @@
-﻿using System;
-using System.Collections.Generic;
+﻿using Microsoft.Win32;
+using System;
 using System.IO;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using System.Xml;
 using System.Xml.Linq;
 
-namespace FSAddonInstaller
-{
-    class Program
-    {
-        static string fsxDirectory = null;
+namespace FSAddonInstaller {
+    class Program {
+        /// <summary>
+        /// Program states
+        /// </summary>
+        private enum State {
+            INSTALL,
+            UNINSTALL
+        }
 
-        static string rootDirectory = null;
-        static int fileCount = 0;
-        static int directoryCount = 0;
-        static int skipCount = 0;
-        static int backupCount = 0;
+        /* String constants */
+        private const string WELCOME_MESSAGE = "Generic FSX Addon Installer/Uninstaller\r\nBy Orion Lyau\r\n\r\nUsage:\r\n[directory]\t- Installs files from the specified directory into FSX.\r\n\t\t- Generates an XML file for uninstallation.\r\n[*.xml]\t\t- Triggers uninstall based on XML configuration file.\r\n\r\n";
+        private const string EXIT_MESSAGE = "\r\nPress any key to close...";
+        private const string INVALID_DIR_OR_FILE = "ERROR: An invalid directory or file was passed as an argument.";
+        private const string INVALID_NUM_ARGS = "ERROR: Invalid number of arguments.";
+        private const string XML_OUTPUT = "\r\n\r\n\tSource directory: {0}\r\n\tDestination directory: {1}\r\n\tTime stamp: {2}\r\n\tProcessed: {3} files, {4} directories\r\n\tSkipped {5} file(s).\r\n\tBacked up {6} file(s).\r\n\r\n";
+        private const string FSX_REG = @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\microsoft games\flight simulator\10.0";
 
-        static XDocument xmlConfig;
+        /* Program members */
+        private State state;
+        private string path;
+        private string fsxDirectory;
+        private int directoryCount;
+        private int fileCount;
+        private int skipCount;
+        private int backupCount;
+        private XDocument xmlConfig;
+        private bool backupAndReplaceEnabled;
 
-        static bool backupAndReplaceEnabled = true;
+        /// <summary>
+        /// Main program entry point
+        /// </summary>
+        /// <param name="args">Command line arguments</param>
+        static void Main(string[] args) {
+            Console.WriteLine(WELCOME_MESSAGE);
 
-        static string getFsxDirectory()
-        {
-            // Get FSX path from registry
-            string dir = (string)Microsoft.Win32.Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\microsoft games\flight simulator\10.0", "SetupPath", null);
+            if (args.Length != 1) {
+                Console.WriteLine(INVALID_NUM_ARGS);
+            } else {
+                try {
+                    Program p = new Program(args[0]);
+                    p.run();
+                } catch (ArgumentException e) {
+                    Console.WriteLine(e.Message);
+                }
+            }
+            
+            Console.WriteLine(EXIT_MESSAGE);
+            Console.ReadKey();
+        }
 
-            // dev
-            //string dir = @"C:\Users\Orion\Desktop\tempfsx";
+        /// <summary>
+        /// Default constructor
+        /// </summary>
+        /// <param name="path">The path to the directory or XML log file</param>
+        Program(string path) {
+            // Argument checks
+            if (Directory.Exists(path)) {
+                state = State.INSTALL;
+            } else if (File.Exists(path) && path.EndsWith(".xml")) {
+                state = State.UNINSTALL;
+            } else {
+                throw new ArgumentException(INVALID_DIR_OR_FILE);
+            }
 
-            // Add ending slash
-            if (!string.IsNullOrEmpty(dir) && !dir.EndsWith("\\"))
-            {
+            // Class member initialisation
+            this.path = path;
+            directoryCount = 0;
+            fileCount = 0;
+            skipCount = 0;
+            backupCount = 0;
+            xmlConfig = null;
+            backupAndReplaceEnabled = true;
+
+            // Get FSX directory
+            fsxDirectory = getFsxDirectory();
+            Console.WriteLine("FSX Directory:\t" + fsxDirectory + "\r\n");
+        }
+
+        /// <summary>
+        /// Runs the program
+        /// </summary>
+        public void run() {
+            switch (state) {
+                case State.INSTALL:
+                    install(path);
+                    break;
+                case State.UNINSTALL:
+                    uninstall(path);
+                    break;
+                default:
+                    return;
+            }
+        }
+
+        /// <summary>
+        /// Installs the addon directory structure
+        /// </summary>
+        /// <param name="path">The directory to install</param>
+        private void install(string path) {
+            // Install setup
+            xmlConfig = new XDocument(
+                new XDeclaration("1.0", "utf-8", "yes"),
+                new XComment("\tThis is an uninstallation configration file. Please do not modify.\t"),
+                new XElement("files")
+            );
+
+            getFilesAndDirectories(path);
+
+            // Install status
+            Console.WriteLine("\r\nProcessed {0} files, {1} directories.\r\n", fileCount, directoryCount);
+            Console.WriteLine("Files skipped: " + skipCount);
+            Console.WriteLine("Files backed up: " + backupCount);
+            Console.WriteLine("Saving uninstallation configuration file.");
+
+            // Save the XML log
+            xmlConfig.AddFirst(new XComment(String.Format(XML_OUTPUT, path, fsxDirectory, DateTime.Now.ToString("F"), fileCount, directoryCount, skipCount, backupCount)));
+            xmlConfig.Save("UninstallConfig_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff") + ".xml");
+        }
+
+        /// <summary>
+        /// Uninstalls an addon using a given XML log
+        /// </summary>
+        /// <param name="path">The path to the XML file</param>
+        private void uninstall(string path) {
+            XmlDocument input;
+            XmlNodeList nodes;
+
+            input = new XmlDocument();
+            input.Load(path);
+            nodes = input.GetElementsByTagName("file");
+
+            for (int i = nodes.Count - 1; i >= 0; i--) {
+                // Determine the file to delete
+                string currentFile = nodes[i].Attributes["location"].Value;
+
+                // Delete the file if it exists
+                if (File.Exists(currentFile)) {
+                    Console.WriteLine("Delete file:\t" + currentFile);
+                    File.Delete(currentFile);
+                    fileCount++;
+                }
+
+                // Restore the backup if one was created
+                if (bool.Parse(nodes[i].Attributes["backupCreated"].Value)) {
+                    if (File.Exists(currentFile + ".bak")) {
+                        File.Move(currentFile + ".bak", currentFile);
+                        backupCount++;
+                    }
+                }
+
+                // Delete the folder the file is in if there's nothing there anymore
+                string currentDirectory = Path.GetDirectoryName(currentFile);
+                if (Directory.GetFileSystemEntries(currentDirectory).Length == 0) {
+                    Console.WriteLine("Delete directory:\t" + currentDirectory);
+                    Directory.Delete(currentDirectory);
+                    directoryCount++;
+                }
+            }
+
+            // Print a summary of operations
+            Console.WriteLine("\r\nDeleted {0} files, {1} directories.\r\nRestored: {2} files.\r\n", fileCount, directoryCount, backupCount);
+        }
+
+        /// <summary>
+        /// Gets the FSX root directory from the registry, including a backslash
+        /// </summary>
+        /// <returns>FSX root directory</returns>
+        private string getFsxDirectory() {
+            string dir = (string)Registry.GetValue(FSX_REG, "SetupPath", null);
+
+            if (!string.IsNullOrEmpty(dir) && !dir.EndsWith("\\")) {
                 dir = dir.Insert(dir.Length, "\\");
             }
 
@@ -41,190 +183,66 @@ namespace FSAddonInstaller
         }
 
         /// <summary>
-        /// Recursively loops through source directory to look for files and calls copying function.
+        /// Recursively loops through source directory to look for files and calls copying function
         /// </summary>
-        /// <param name="source">Root directory to start copying at.</param>
-        static void getFilesAndDirectories(string source)
-        {
-            // Get ALL the files
-            foreach (string s in Directory.GetFiles(source))
-            {
-                //Console.WriteLine("File:\t" + s);
+        /// <param name="source">Root directory to start copying at</param>
+        private void getFilesAndDirectories(string source) {
+            foreach (string file in Directory.GetFiles(source)) {
+                // Get the relative path
+                string relPath = file.Substring(path.Length + 1, (file.Length - path.Length) - 1);
+                Console.WriteLine(Path.Combine(fsxDirectory, relPath));
 
-                // Get relative path
-                string temp = s.Substring(rootDirectory.Length + 1, s.Length - rootDirectory.Length - 1);
-                //Console.WriteLine("Relative:\t" + temp);
-
-                // Get new destination
-                Console.WriteLine(Path.Combine(fsxDirectory, temp));
-
-                //xmlConfig.Element("files").Add(new XElement("file", new XAttribute("location", Path.Combine(fsxDirectory, temp))));
-
-                // Copy file
-                copyFile(s, Path.Combine(fsxDirectory, temp));
-
-                // Increment counter
+                // Copy the file to the new location
+                copyFile(file, Path.Combine(fsxDirectory, relPath));
                 fileCount++;
             }
 
-            // Get ALL the directories
-            foreach (string s in Directory.GetDirectories(source))
-            {
-                //Console.WriteLine("Directory:\t" + s);
-
-                //string temp = s.Substring(rootDirectory.Length, s.Length - rootDirectory.Length);
-                //Console.WriteLine("Relative:\t" + temp);
-
+            foreach (string directory in Directory.GetDirectories(source)) {
                 directoryCount++;
-                getFilesAndDirectories(s);
+                getFilesAndDirectories(directory);
             }
         }
 
         /// <summary>
-        /// Copies a file.
+        /// Copies a file
         /// </summary>
-        /// <param name="source">The full path to the source file.</param>
-        /// <param name="destination">The full path to the destination file.</param>
-        static void copyFile(string source, string destination)
-        {
+        /// <param name="source">The full path to the source file</param>
+        /// <param name="destination">The full path to the destination file</param>
+        private void copyFile(string source, string destination) {
             bool backupCreated = false;
 
-            // log copy
+            // Status output
             Console.WriteLine("Copy:\r\n{0}\r\n{1}", source, destination);
 
-            // create directory if it doesn't exist
-            if (!Directory.Exists(Path.GetDirectoryName(destination)))
-            {
+            // Create directory if it doesn't exist
+            if (!Directory.Exists(Path.GetDirectoryName(destination))) {
                 Directory.CreateDirectory(Path.GetDirectoryName(destination));
             }
 
-            // actual copying takes place here
-            if (!File.Exists(destination))
-            {
-                // copy the file if it doesn't already exist
+            // Actual copying takes place here
+            if (!File.Exists(destination)) {
                 File.Copy(source, destination);
-            }
-            else if (backupAndReplaceEnabled)
-            {
-                // replacing files is enabled
-
+            } else if (backupAndReplaceEnabled) {
                 // make a backup if it doesn't exist
-                if (!File.Exists(destination + ".bak"))
-                {
+                if (!File.Exists(destination + ".bak")) {
                     File.Move(destination, destination + ".bak");
                     backupCreated = true;
                     backupCount++;
                 }
 
                 // delete original file
-                if (File.Exists(destination))
-                {
+                if (File.Exists(destination)) {
                     File.Delete(destination);
                 }
 
                 // replace the old file
                 File.Copy(source, destination);
-            }
-            else
-            {
+            } else {
                 skipCount++;
             }
 
-            //xmlConfig.Element("files").Add(new XElement("file", new XAttribute("location", destination)));
+            // Log the operation
             xmlConfig.Element("files").Add(new XElement("file", new XAttribute("location", destination), new XAttribute("backupCreated", backupCreated)));
-        }
-
-        static void Main(string[] args)
-        {
-            Console.WriteLine("Generic FSX Addon Installer/Uninstaller\r\nBy Orion Lyau\r\n\r\nUsage:\r\n[directory]\t- Installs files from the specified directory into FSX.\r\n\t\t- Generates an XML file for uninstallation.\r\n[*.xml]\t\t- Triggers uninstall based on XML configuration file.\r\n\r\n");
-
-            // Get FSX directory
-            fsxDirectory = getFsxDirectory();
-            Console.WriteLine("FSX Directory:\t" + fsxDirectory + "\r\n");
-
-            // The first argument is a directory
-            // Start install
-
-            if (Directory.Exists(args[0]))
-            {
-                // Set root directory
-                rootDirectory = args[0];
-
-                // Set up XML file
-                xmlConfig = new XDocument(
-                    new XDeclaration("1.0", "utf-8", "yes"),
-                    new XComment("\tThis is an uninstallation configration file.  Please do not modify.\t"),
-                    new XElement("files")
-                    );
-
-                // Recursion
-                getFilesAndDirectories(args[0]);
-
-                // Write metadata
-
-                Console.WriteLine("\r\nProcessed {0} files, {1} directories.\r\n", fileCount, directoryCount);
-                Console.WriteLine("Files skipped: " + skipCount);
-                Console.WriteLine("Files backed up: " + backupCount);
-
-                Console.WriteLine("Saving uninstallation configuration file.");
-
-                // Save configuration file
-                xmlConfig.AddFirst(new XComment(String.Format("\r\n\r\n\tSource directory: {0}\r\n\tDestination directory: {1}\r\n\tTime stamp: {2}\r\n\tProcessed: {3} files, {4} directories\r\n\tSkipped {5} file(s).\r\n\tBacked up {6} file(s).\r\n\r\n", args[0], fsxDirectory, DateTime.Now.ToString("F"), fileCount, directoryCount, skipCount, backupCount)));
-
-                xmlConfig.Save("UninstallConfig_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff") + ".xml");
-            }
-
-            // The first argument is a XML file
-            // Start uninstall
-
-            if (File.Exists(args[0]) && args[0].EndsWith(".xml"))
-            {
-                XmlDocument input = new XmlDocument();
-                input.Load(args[0]);
-                XmlNodeList nodes = input.GetElementsByTagName("file");
-                //int loopcount = 0;
-
-                for (int x = nodes.Count - 1; x >= 0; x--)
-                {
-                    //loopcount++;
-
-                    // determine file to delete
-                    string currentFile = nodes[x].Attributes["location"].Value;
-
-                    // delete the file if it exists
-                    if (File.Exists(currentFile))
-                    {
-                        Console.WriteLine("Delete file:\t" + currentFile);
-                        File.Delete(currentFile);
-                        fileCount++;
-                    }
-
-                    // restore the backup if one was created
-                    if (bool.Parse(nodes[x].Attributes["backupCreated"].Value))
-                    {
-                        if (File.Exists(currentFile + ".bak"))
-                        {
-                            File.Move(currentFile + ".bak", currentFile);
-                            backupCount++;
-                        }
-                    }
-
-                    // delete the folder the file is in if there's nothing there anymore
-                    string currentDirectory = Path.GetDirectoryName(currentFile);
-                    if (Directory.GetFileSystemEntries(currentDirectory).Length == 0)
-                    {
-                        Console.WriteLine("Delete directory:\t" + currentDirectory);
-                        Directory.Delete(currentDirectory);
-                        directoryCount++;
-                    }
-                }
-
-                //Console.WriteLine("Loop count:\t{0}\r\nNode count:\t{1}", loopcount, nodes.Count);
-                Console.WriteLine("\r\nDeleted {0} files, {1} directories.\r\nRestored: {2} files.\r\n", fileCount, directoryCount, backupCount);
-            }
-
-            Console.WriteLine("\r\nPress any key to close...");
-            Console.ReadKey();
         }
     }
 }
